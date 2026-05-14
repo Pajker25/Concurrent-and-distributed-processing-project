@@ -4,9 +4,8 @@ import pygame
 import socket
 import threading
 import pickle
-from ui import Theme, UI, Button, draw_board, draw_token, animate_drop, draw_overlay, draw_chat_history, WIDTH, HEIGHT, CELL_SIZE, TOP_MARGIN
+from ui import Theme, UI, Button, draw_board, draw_token, animate_drop, draw_overlay, draw_chat_history, get_winning_coords, WIDTH, HEIGHT, CELL_SIZE, TOP_MARGIN
 from game_logic import GameLogic, GameState
-
 
 class Network:
     def __init__(self):
@@ -21,12 +20,13 @@ class Network:
         self.nickname = "Player"
         self.messages = []
         self.players = {1: "Player 1", 2: "Player 2"}
+        self.opponent_disconnected = False
 
     def connect(self):
         try:
             self.client.connect((self.host, self.port))
             threading.Thread(target=self.receive, daemon=True).start()
-            self.send({"type": "LIST"})
+            self.send({"type": "LIST", "nick": self.nickname})
             return True
         except Exception:
             return False
@@ -41,6 +41,7 @@ class Network:
         self.game_state = None
         self.messages = []
         self.app_state = "LOBBY"
+        self.opponent_disconnected = False
 
     def receive(self):
         while True:
@@ -63,6 +64,8 @@ class Network:
                     self.game_state = msg["state"]
                     if self.game_state.ready:
                         self.app_state = "GAME"
+                elif msg["type"] == "OPPONENT_DISCONNECTED":
+                    self.opponent_disconnected = msg["status"]
                 elif msg["type"] == "CHAT":
                     self.messages.append({
                         "text": msg["msg"], 
@@ -129,7 +132,7 @@ def lobby_screen(screen, net, font, title_font):
                     net.send({"type": "CREATE", "name": room_text, "nick": nick_text})
 
                 if refresh_btn.clicked(event, mouse):
-                    net.send({"type": "LIST"})
+                    net.send({"type": "LIST", "nick": nick_text})
 
                 y = 330
                 for name in net.rooms:
@@ -201,8 +204,11 @@ def play_online_game(screen, net, font, title_font):
     play_again_btn = UI.play_again_button(font)
     quit_btn = UI.quit_button(font)
     
+    confirm_leave = False
+    confirm_yes_btn = Button(WIDTH//2 - 110, HEIGHT//2, 100, 50, "Yes", font)
+    confirm_no_btn = Button(WIDTH//2 + 10, HEIGHT//2, 100, 50, "No", font)
+    
     local_game_over = False
-    waiting_for_rematch = False 
 
     while net.app_state == "GAME":
         mouse = pygame.mouse.get_pos()
@@ -211,16 +217,24 @@ def play_online_game(screen, net, font, title_font):
         if net.game_state:
             if not net.game_state.game_over and local_game_over:
                 local_game_over = False
-                waiting_for_rematch = False 
                 last_board = [[0]*7 for _ in range(6)]
 
+            # Analyze differences between local state and server state
+            diffs = []
             for r in range(6):
                 for c in range(7):
-                    new_val = net.game_state.board[r][c]
-                    if new_val != last_board[r][c]:
-                        if new_val != 0:
-                            animate_drop(screen, last_board, c, r, new_val)
-                        last_board[r][c] = new_val
+                    if net.game_state.board[r][c] != last_board[r][c]:
+                        diffs.append((r, c, net.game_state.board[r][c]))
+
+            if len(diffs) == 1:
+                r, c, new_val = diffs[0]
+                if new_val != 0:
+                    animate_drop(screen, last_board, c, r, new_val)
+                last_board[r][c] = new_val
+            elif len(diffs) > 1:
+                for r in range(6):
+                    for c in range(7):
+                        last_board[r][c] = net.game_state.board[r][c]
 
             draw_board(screen, net.game_state.board)
             pygame.draw.rect(screen, (35, 37, 54), (0, 0, WIDTH, 60))
@@ -251,37 +265,82 @@ def play_online_game(screen, net, font, title_font):
                 hint_txt = font.render("Chat [ENTER]", True, (200, 200, 200))
                 screen.blit(hint_txt, (WIDTH - hint_txt.get_width() - 15, 15))
 
-            if not net.game_state.game_over and net.game_state.turn == net.player_id and not typing:
+            if not net.game_state.game_over and net.game_state.turn == net.player_id and not typing and not confirm_leave and not net.opponent_disconnected:
                 col = mouse[0] // CELL_SIZE
                 draw_token(screen, net.player_id, int(col * CELL_SIZE + CELL_SIZE / 2), TOP_MARGIN - 50)
 
         if local_game_over and net.game_state:
             winner_nick = net.players.get(net.game_state.winner, "No one")
-            txt = "DRAW!" if net.game_state.winner == 0 else f"{winner_nick} WINS!"
+            if net.game_state.winner == 0:
+                txt = "DRAW!"
+                winner_color = Theme.TEXT
+            else:
+                winner_color = Theme.P1 if net.game_state.winner == 1 else Theme.P2
+                if not get_winning_coords(net.game_state.board, net.game_state.winner):
+                    txt = f"FORFEIT! {winner_nick} WINS!"
+                else:
+                    txt = f"{winner_nick} WINS!"
             
-            draw_overlay(screen, txt, title_font, Theme.TEXT if net.game_state.winner == 0 else color, board=net.game_state.board, winner=net.game_state.winner)
-            
+            draw_overlay(screen, txt, title_font, winner_color, board=net.game_state.board, winner=net.game_state.winner)
             play_again_btn.draw(screen, mouse)
             quit_btn.draw(screen, mouse)
+            
+        elif net.opponent_disconnected:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 180))
+            screen.blit(overlay, (0, 0))
+            txt = font.render("Opponent disconnected. Waiting...", True, Theme.P2)
+            screen.blit(txt, txt.get_rect(center=(WIDTH//2, HEIGHT//2)))
+            leave_btn.draw(screen, mouse)
+            
+        elif confirm_leave:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 200))
+            screen.blit(overlay, (0, 0))
+            txt = font.render("Leave and forfeit the game?", True, Theme.TEXT)
+            screen.blit(txt, txt.get_rect(center=(WIDTH//2, HEIGHT//2 - 40)))
+            confirm_yes_btn.draw(screen, mouse)
+            confirm_no_btn.draw(screen, mouse)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return "QUIT"
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                if leave_btn.clicked(event, mouse) and not local_game_over:
-                    net.send({"type": "LEAVE"})
-                    net.reset_game_data()
-                    return "LOBBY"
-                
-                if not typing and not local_game_over and net.game_state:
-                    if net.game_state.turn == net.player_id:
+                if confirm_leave:
+                    if confirm_yes_btn.clicked(event, mouse):
+                        net.send({"type": "SURRENDER"})
+                        net.reset_game_data()
+                        return "LOBBY"
+                    if confirm_no_btn.clicked(event, mouse):
+                        confirm_leave = False
+                        
+                elif net.opponent_disconnected and not local_game_over:
+                    if leave_btn.clicked(event, mouse):
+                        net.send({"type": "LEAVE"})
+                        net.reset_game_data()
+                        return "LOBBY"
+                        
+                elif not local_game_over:
+                    if leave_btn.clicked(event, mouse):
+                        confirm_leave = True
+                    elif not typing and net.game_state and net.game_state.turn == net.player_id:
                         net.send({"type": "MOVE", "col": event.pos[0] // CELL_SIZE})
+                        
+                elif local_game_over:
+                    if play_again_btn.clicked(event, mouse):
+                        net.send({"type": "REMATCH"})
+                        net.app_state = "WAITING"
+                        return "WAITING"
+                    if quit_btn.clicked(event, mouse):
+                        net.send({"type": "LEAVE"})
+                        net.reset_game_data()
+                        return "LOBBY"
 
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
                     pygame.display.toggle_fullscreen()
-                if event.key == pygame.K_RETURN:
+                if event.key == pygame.K_RETURN and not confirm_leave and not local_game_over:
                     if typing:
                         if chat_input:
                             net.send({"type": "CHAT", "text": chat_input})
@@ -296,17 +355,6 @@ def play_online_game(screen, net, font, title_font):
                         chat_input = chat_input[:-1]
                     elif len(chat_input) < 25: 
                         chat_input += event.unicode
-
-            if local_game_over and event.type == pygame.MOUSEBUTTONDOWN:
-                if play_again_btn.clicked(event, mouse):
-                    net.send({"type": "REMATCH"})
-                    net.app_state = "WAITING"
-                    return "WAITING"
-                    
-                if quit_btn.clicked(event, mouse):
-                    net.send({"type": "LEAVE"})
-                    net.reset_game_data()
-                    return "LOBBY"
 
         pygame.display.update()
     return net.app_state

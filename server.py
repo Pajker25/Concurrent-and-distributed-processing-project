@@ -1,4 +1,4 @@
-# Multiplayer server implementation handling game rooms and client connections
+# Multiplayer server handling game rooms, client connections, and reconnections
 
 import socket
 import threading
@@ -9,19 +9,19 @@ HOST = '0.0.0.0'
 PORT = 5555
 server_running = True
 
-
 rooms = {}
 rooms_lock = threading.RLock()
 
 def broadcast_room(room_name):
+    # Broadcasts state to all connected players in the room
     with rooms_lock:
         room = rooms.get(room_name)
         if not room:
             return
         state = room["state"]
-        clients = list(room["clients"].keys())
+        conns = [p["conn"] for p in room["players"].values() if p["connected"] and p["conn"]]
 
-    for conn in clients:
+    for conn in conns:
         try:
             conn.send(pickle.dumps({
                 "type": "STATE",
@@ -31,31 +31,52 @@ def broadcast_room(room_name):
             pass
 
 def handle_client(conn, addr):
+    # Manages a single client connection, handling joins, moves, and disconnects
     current_room = None
     player_id = None
 
-    def leave_room():
+    def handle_intentional_leave(is_surrender=False):
+        # Processes a player leaving intentionally or surrendering
         nonlocal current_room, player_id
         with rooms_lock:
             if current_room and current_room in rooms:
                 room = rooms[current_room]
-                if conn in room["clients"]:
-                    del room["clients"][conn]
-
-                if len(room["clients"]) == 0:
+                
+                if is_surrender and not room["state"].game_over:
+                    room["state"].game_over = True
+                    room["state"].winner = 3 - player_id
+                    broadcast_room(current_room)
+                
+                if player_id in room["players"]:
+                    del room["players"][player_id]
+                    
+                if len(room["players"]) == 0:
                     del rooms[current_room]
-                else:
-                    room["state"] = GameState()
-                    for c in room["clients"]:
+                    
+        current_room = None
+        player_id = None
+
+    def handle_disconnect():
+        # Marks a player as disconnected allowing them to rejoin later
+        nonlocal current_room, player_id
+        with rooms_lock:
+            if current_room and current_room in rooms:
+                room = rooms[current_room]
+                if player_id in room["players"]:
+                    room["players"][player_id]["connected"] = False
+                    room["players"][player_id]["conn"] = None
+                    
+                    other_id = 3 - player_id
+                    if other_id in room["players"] and room["players"][other_id]["connected"]:
                         try:
-                            c.send(pickle.dumps({
-                                "type": "WAITING",
-                                "player_id": 1
+                            room["players"][other_id]["conn"].send(pickle.dumps({
+                                "type": "OPPONENT_DISCONNECTED", "status": True
                             }))
                         except Exception:
                             pass
-        current_room = None
-        player_id = None
+                
+                if all(not p["connected"] for p in room["players"].values()):
+                    del rooms[current_room]
 
     while True:
         try:
@@ -67,19 +88,35 @@ def handle_client(conn, addr):
             msg_type = msg.get("type")
 
             if msg_type == "LIST":
+                requester_nick = msg.get("nick", "")
                 with rooms_lock:
-                    available = {
-                        name: len(r["clients"])
-                        for name, r in rooms.items()
-                        if len(r["clients"]) < 2
-                    }
+                    available = {}
+                    for name, r in rooms.items():
+                        if r["state"].game_over:
+                            continue
+                            
+                        total_players = len(r["players"])
+                        active_players = sum(1 for p in r["players"].values() if p["connected"])
+                        
+                        if total_players == 1:
+                            available[name] = active_players
+                        elif total_players == 2 and active_players == 1:
+                            disconnected_nick = None
+                            for p in r["players"].values():
+                                if not p["connected"]:
+                                    disconnected_nick = p["nick"]
+                                    break
+                            
+                            if disconnected_nick == requester_nick:
+                                available[name] = active_players
+                                
                 conn.send(pickle.dumps({
                     "type": "LIST",
                     "rooms": available
                 }))
 
             elif msg_type == "CREATE":
-                leave_room()
+                handle_intentional_leave(False)
                 name = msg.get("name")
                 nick = msg.get("nick", "Player 1")
 
@@ -87,7 +124,7 @@ def handle_client(conn, addr):
                     if name and name not in rooms:
                         rooms[name] = {
                             "state": GameState(),
-                            "clients": {conn: {"id": 1, "nick": nick, "rematch": False}} 
+                            "players": {1: {"conn": conn, "nick": nick, "rematch": False, "connected": True}}
                         }
                         current_room = name
                         player_id = 1
@@ -97,74 +134,130 @@ def handle_client(conn, addr):
                         }))
 
             elif msg_type == "JOIN":
-                leave_room()
+                handle_intentional_leave(False)
                 name = msg.get("name")
                 nick = msg.get("nick", "Player 2")
 
                 with rooms_lock:
-                    if name in rooms and len(rooms[name]["clients"]) < 2:
-                        current_room = name
-                        player_id = 2
-                        rooms[name]["clients"][conn] = {"id": 2, "nick": nick, "rematch": False}
-                        rooms[name]["state"].ready = True
-
-                        players_info = {
-                            c_info["id"]: c_info["nick"] 
-                            for c_info in rooms[name]["clients"].values()
-                        }
-
-                        for c in rooms[name]["clients"]:
-                            c.send(pickle.dumps({
-                                "type": "GAME_START",
-                                "player_id": rooms[name]["clients"][c]["id"],
-                                "players": players_info
-                            }))
-                        broadcast_room(current_room)
+                    if name in rooms:
+                        room = rooms[name]
+                        rejoined = False
+                        
+                        for pid, pdata in room["players"].items():
+                            if not pdata["connected"] and pdata["nick"] == nick:
+                                pdata["conn"] = conn
+                                pdata["connected"] = True
+                                current_room = name
+                                player_id = pid
+                                rejoined = True
+                                
+                                players_info = {p_id: p["nick"] for p_id, p in room["players"].items()}
+                                conn.send(pickle.dumps({
+                                    "type": "GAME_START",
+                                    "player_id": pid,
+                                    "players": players_info
+                                }))
+                                
+                                other_id = 3 - pid
+                                if other_id in room["players"] and room["players"][other_id]["connected"]:
+                                    try:
+                                        room["players"][other_id]["conn"].send(pickle.dumps({
+                                            "type": "OPPONENT_DISCONNECTED", "status": False
+                                        }))
+                                        room["players"][other_id]["conn"].send(pickle.dumps({
+                                            "type": "GAME_START", 
+                                            "player_id": other_id, 
+                                            "players": players_info
+                                        }))
+                                    except Exception:
+                                        pass
+                                        
+                                broadcast_room(current_room)
+                                break
+                        
+                        if not rejoined and len(room["players"]) < 2 and not room["state"].game_over:
+                            pid = 2 if 1 in room["players"] else 1
+                            room["players"][pid] = {"conn": conn, "nick": nick, "rematch": False, "connected": True}
+                            current_room = name
+                            player_id = pid
+                            room["state"].ready = True
+                            
+                            players_info = {p_id: p["nick"] for p_id, p in room["players"].items()}
+                            for p_id, p_data in room["players"].items():
+                                if p_data["connected"] and p_data["conn"]:
+                                    try:
+                                        p_data["conn"].send(pickle.dumps({
+                                            "type": "GAME_START",
+                                            "player_id": p_id,
+                                            "players": players_info
+                                        }))
+                                    except Exception:
+                                        pass
+                            broadcast_room(current_room)
 
             elif msg_type == "CHAT":
                 if current_room:
                     with rooms_lock:
-                        nick = rooms[current_room]["clients"][conn]["nick"]
-                        text = f"{nick}: {msg.get('text')}"
-                        chat_packet = pickle.dumps({"type": "CHAT", "msg": text})
-                        for c in rooms[current_room]["clients"]:
-                            try:
-                                c.send(chat_packet)
-                            except Exception:
-                                pass
+                        room = rooms[current_room]
+                        if player_id in room["players"]:
+                            nick = room["players"][player_id]["nick"]
+                            text = f"{nick}: {msg.get('text')}"
+                            chat_packet = pickle.dumps({"type": "CHAT", "msg": text})
+                            for p in room["players"].values():
+                                if p["connected"] and p["conn"]:
+                                    try:
+                                        p["conn"].send(chat_packet)
+                                    except Exception:
+                                        pass
 
             elif msg_type == "MOVE":
                 if current_room:
                     with rooms_lock:
-                        state = rooms[current_room]["state"]
-                        state.play_move(msg.get("col"), player_id)
+                        room = rooms[current_room]
+                        state = room["state"]
+                        if not state.game_over and len(room["players"]) == 2 and all(p["connected"] for p in room["players"].values()):
+                            state.play_move(msg.get("col"), player_id)
                     broadcast_room(current_room)
 
             elif msg_type == "REMATCH":
                 if current_room:
                     with rooms_lock:
-                        rooms[current_room]["clients"][conn]["rematch"] = True
-                        clients_list = list(rooms[current_room]["clients"].values())
+                        room = rooms[current_room]
+                        if player_id in room["players"]:
+                            room["players"][player_id]["rematch"] = True
                         
-                        if len(clients_list) == 2 and all(c.get("rematch") for c in clients_list):
-                            rooms[current_room]["state"] = GameState()
-                            rooms[current_room]["state"].ready = True
-                            
-                            for c in rooms[current_room]["clients"].values():
-                                c["rematch"] = False
-                            
+                        if len(room["players"]) == 2 and all(p.get("rematch") for p in room["players"].values()):
+                            room["state"] = GameState()
+                            room["state"].ready = True
+                            for p in room["players"].values():
+                                p["rematch"] = False
                             broadcast_room(current_room)
+                        elif len(room["players"]) == 1:
+                            room["state"] = GameState()
+                            room["players"][player_id]["rematch"] = False
+                            if player_id != 1:
+                                room["players"][1] = room["players"].pop(player_id)
+                                player_id = 1
+                            conn.send(pickle.dumps({
+                                "type": "WAITING",
+                                "player_id": 1
+                            }))
+
+            elif msg_type == "SURRENDER":
+                handle_intentional_leave(True)
 
             elif msg_type == "LEAVE":
-                leave_room()
+                handle_intentional_leave(False)
 
         except Exception:
+            handle_disconnect()
             break
 
-    leave_room()
+    handle_disconnect()
     conn.close()
 
 def start_server():
+    # Initializes and runs the main server socket
     global server_running
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
