@@ -10,7 +10,7 @@ from game_logic import GameLogic, GameState
 class Network:
     def __init__(self):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.host = '127.0.0.1'
+        self.host = '26.52.208.28'
         self.port = 5555
         self.player_id = None
         self.game_state = None
@@ -219,7 +219,6 @@ def play_online_game(screen, net, font, title_font):
                 local_game_over = False
                 last_board = [[0]*7 for _ in range(6)]
 
-            # Analyze differences between local state and server state
             diffs = []
             for r in range(6):
                 for c in range(7):
@@ -310,8 +309,7 @@ def play_online_game(screen, net, font, title_font):
                 if confirm_leave:
                     if confirm_yes_btn.clicked(event, mouse):
                         net.send({"type": "SURRENDER"})
-                        net.reset_game_data()
-                        return "LOBBY"
+                        confirm_leave = False
                     if confirm_no_btn.clicked(event, mouse):
                         confirm_leave = False
                         

@@ -42,17 +42,36 @@ def handle_client(conn, addr):
             if current_room and current_room in rooms:
                 room = rooms[current_room]
                 
-                if is_surrender and not room["state"].game_over:
-                    room["state"].game_over = True
-                    room["state"].winner = 3 - player_id
-                    broadcast_room(current_room)
-                
+                if is_surrender:
+                    if not room["state"].game_over:
+                        room["state"].game_over = True
+                        room["state"].winner = 3 - player_id
+                        broadcast_room(current_room)
+                    return  # Do not remove the player yet; keep them to view the forfeit overlay
+
                 if player_id in room["players"]:
                     del room["players"][player_id]
                     
                 if len(room["players"]) == 0:
                     del rooms[current_room]
+                else:
+                    # One player left behind. Reset room state so a new player can join fresh.
+                    room["state"] = GameState()
+                    room["state"].ready = False
+                    for p in room["players"].values():
+                        p["rematch"] = False
                     
+                    # Tell the remaining player they are now waiting for a new opponent from the lobby
+                    for p_id, p_data in room["players"].items():
+                        if p_data["connected"] and p_data["conn"]:
+                            try:
+                                p_data["conn"].send(pickle.dumps({
+                                    "type": "WAITING",
+                                    "player_id": p_id
+                                }))
+                            except Exception:
+                                pass
+                                
         current_room = None
         player_id = None
 
@@ -226,22 +245,32 @@ def handle_client(conn, addr):
                         if player_id in room["players"]:
                             room["players"][player_id]["rematch"] = True
                         
-                        if len(room["players"]) == 2 and all(p.get("rematch") for p in room["players"].values()):
+                        if len(room["players"]) == 2 and all(p.get("rematch") for p in room["players"].values() if p["connected"]):
                             room["state"] = GameState()
                             room["state"].ready = True
                             for p in room["players"].values():
                                 p["rematch"] = False
+                            
+                            players_info = {p_id: p["nick"] for p_id, p in room["players"].items()}
+                            for p_id, p_data in room["players"].items():
+                                if p_data["connected"] and p_data["conn"]:
+                                    try:
+                                        p_data["conn"].send(pickle.dumps({
+                                            "type": "GAME_START",
+                                            "player_id": p_id,
+                                            "players": players_info
+                                        }))
+                                    except Exception:
+                                        pass
                             broadcast_room(current_room)
-                        elif len(room["players"]) == 1:
-                            room["state"] = GameState()
-                            room["players"][player_id]["rematch"] = False
-                            if player_id != 1:
-                                room["players"][1] = room["players"].pop(player_id)
-                                player_id = 1
-                            conn.send(pickle.dumps({
-                                "type": "WAITING",
-                                "player_id": 1
-                            }))
+                        else:
+                            try:
+                                conn.send(pickle.dumps({
+                                    "type": "WAITING",
+                                    "player_id": player_id
+                                }))
+                            except Exception:
+                                pass
 
             elif msg_type == "SURRENDER":
                 handle_intentional_leave(True)
