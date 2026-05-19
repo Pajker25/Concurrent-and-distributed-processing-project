@@ -1,5 +1,6 @@
 # Core game rules and board validation
 
+
 class GameLogic:
     ROWS = 6
     COLS = 7
@@ -31,22 +32,22 @@ class GameLogic:
 
         for r in range(rows):
             for c in range(cols - w + 1):
-                if all(board[r][c+i] == piece for i in range(w)):
+                if all(board[r][c + i] == piece for i in range(w)):
                     return True
 
         for c in range(cols):
             for r in range(rows - w + 1):
-                if all(board[r+i][c] == piece for i in range(w)):
+                if all(board[r + i][c] == piece for i in range(w)):
                     return True
 
         for r in range(rows - w + 1):
             for c in range(cols - w + 1):
-                if all(board[r+i][c+i] == piece for i in range(w)):
+                if all(board[r + i][c + i] == piece for i in range(w)):
                     return True
 
         for r in range(w - 1, rows):
             for c in range(cols - w + 1):
-                if all(board[r-i][c+i] == piece for i in range(w)):
+                if all(board[r - i][c + i] == piece for i in range(w)):
                     return True
 
         return False
@@ -54,7 +55,8 @@ class GameLogic:
     @staticmethod
     def is_draw(board):
         return all(board[0][c] != 0 for c in range(GameLogic.COLS))
-    
+
+
 class GameState:
     def __init__(self):
         self.board = GameLogic.create_board()
