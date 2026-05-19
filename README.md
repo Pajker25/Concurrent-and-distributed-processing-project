@@ -192,3 +192,14 @@ token_p2.png
 
 ---
 
+# Screenshots
+
+Here are the screenshots that demonstrate how the game looks:
+
+<img src="./screenshots/example1.png">
+
+
+<img src="./screenshots/example2.png">
+
+
+<img src="./screenshots/example3.png">
