@@ -5,8 +5,6 @@ import sys
 from ai_logic import Connect4AI
 from game_logic import GameLogic
 from ui import Theme, Assets, Fonts, UI, Button, draw_board, draw_token, animate_drop, draw_overlay, WIDTH, HEIGHT, CELL_SIZE, TOP_MARGIN
-
-# Import networking components from our new module
 from network import Network, lobby_screen, waiting_screen, play_online_game
 
 
