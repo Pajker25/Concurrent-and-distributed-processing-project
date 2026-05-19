@@ -13,7 +13,6 @@ rooms = {}
 rooms_lock = threading.RLock()
 
 def broadcast_room(room_name):
-    # Broadcasts state to all connected players in the room
     with rooms_lock:
         room = rooms.get(room_name)
         if not room:
@@ -31,12 +30,10 @@ def broadcast_room(room_name):
             pass
 
 def handle_client(conn, addr):
-    # Manages a single client connection, handling joins, moves, and disconnects
     current_room = None
     player_id = None
 
     def handle_intentional_leave(is_surrender=False):
-        # Processes a player leaving intentionally or surrendering
         nonlocal current_room, player_id
         with rooms_lock:
             if current_room and current_room in rooms:
@@ -47,7 +44,7 @@ def handle_client(conn, addr):
                         room["state"].game_over = True
                         room["state"].winner = 3 - player_id
                         broadcast_room(current_room)
-                    return  # Do not remove the player yet; keep them to view the forfeit overlay
+                    return  
 
                 if player_id in room["players"]:
                     del room["players"][player_id]
@@ -55,13 +52,11 @@ def handle_client(conn, addr):
                 if len(room["players"]) == 0:
                     del rooms[current_room]
                 else:
-                    # One player left behind. Reset room state so a new player can join fresh.
                     room["state"] = GameState()
                     room["state"].ready = False
                     for p in room["players"].values():
                         p["rematch"] = False
                     
-                    # Tell the remaining player they are now waiting for a new opponent from the lobby
                     for p_id, p_data in room["players"].items():
                         if p_data["connected"] and p_data["conn"]:
                             try:
@@ -76,7 +71,6 @@ def handle_client(conn, addr):
         player_id = None
 
     def handle_disconnect():
-        # Marks a player as disconnected allowing them to rejoin later
         nonlocal current_room, player_id
         with rooms_lock:
             if current_room and current_room in rooms:
@@ -286,7 +280,6 @@ def handle_client(conn, addr):
     conn.close()
 
 def start_server():
-    # Initializes and runs the main server socket
     global server_running
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
